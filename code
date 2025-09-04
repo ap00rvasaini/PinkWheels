@@ -1,0 +1,117 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+import timm
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+# 1. Device (GPU if available, else CPU)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using", DEVICE)
+
+# 2. Data Preprocessing & Augmentation
+# EfficientNet-B7 expects ~600x600 input size
+transform_train = transforms.Compose([
+    transforms.RandomResizedCrop(600),   # randomly crop image to 600x600
+    transforms.RandomHorizontalFlip(),   # flip images to learn invariance
+    transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.2),
+    transforms.RandomRotation(20),       # small rotations
+    transforms.ToTensor(),               # convert PIL image to tensor
+    transforms.Normalize([0.485, 0.456, 0.406],  # mean (ImageNet)
+                         [0.229, 0.224, 0.225]) # std (ImageNet)
+])
+
+transform_val = transforms.Compose([
+    transforms.Resize(620),
+    transforms.CenterCrop(600),          # crop center to 600x600
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406],
+                         [0.229, 0.224, 0.225])
+])
+
+# 3. Dataset & DataLoader
+train_dataset = datasets.ImageFolder("bird_dataset/train", transform=transform_train)
+val_dataset   = datasets.ImageFolder("bird_dataset/val", transform=transform_val)
+
+train_loader = DataLoader(train_dataset, batch_size=8, shuffle=True, num_workers=2)
+val_loader   = DataLoader(val_dataset, batch_size=8, shuffle=False, num_workers=2)
+
+num_classes = len(train_dataset.classes)
+print("Classes:", train_dataset.classes)
+
+# 4. Model: EfficientNet-B7 (very powerful, pretrained on ImageNet)
+model = timm.create_model("efficientnet_b7", pretrained=True, num_classes=num_classes)
+
+# Freeze all layers first (feature extractor mode)
+for param in model.parameters():
+    param.requires_grad = False
+
+# Unfreeze only classifier (final layer)
+for param in model.get_classifier().parameters():
+    param.requires_grad = True
+
+model = model.to(DEVICE)
+
+# 5. Loss, Optimizer, Scheduler
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=1e-4, weight_decay=1e-4)
+scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2, verbose=True)
+
+# 6. Training Loop with Early Stopping
+def train_model(epochs=15):
+    best_val_acc = 0
+    patience, trials = 5, 0  # early stopping after 5 bad epochs
+
+    for epoch in range(epochs):
+        model.train()
+        running_loss, correct, total = 0.0, 0, 0
+
+        # Training
+        for images, labels in train_loader:
+            images, labels = images.to(DEVICE), labels.to(DEVICE)
+
+            optimizer.zero_grad()            # reset gradients
+            outputs = model(images)          # forward pass
+            loss = criterion(outputs, labels) # compute loss
+            loss.backward()                  # backpropagation
+            optimizer.step()                 # update weights
+
+            running_loss += loss.item()
+            _, predicted = outputs.max(1)
+            total += labels.size(0)
+            correct += predicted.eq(labels).sum().item()
+
+        train_acc = 100. * correct / total
+
+        # Validation
+        model.eval()
+        val_correct, val_total = 0, 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(DEVICE), labels.to(DEVICE)
+                outputs = model(images)
+                _, predicted = outputs.max(1)
+                val_total += labels.size(0)
+                val_correct += predicted.eq(labels).sum().item()
+
+        val_acc = 100. * val_correct / val_total
+        scheduler.step(val_acc)
+
+        print(f"Epoch [{epoch+1}/{epochs}] Loss: {running_loss/len(train_loader):.4f} "
+              f"Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}%")
+
+        # Save best model
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            torch.save(model.state_dict(), "best_bird_classifier_b7.pth")
+            print("✅ Saved new best model")
+            trials = 0
+        else:
+            trials += 1
+            if trials >= patience:
+                print("⏹ Early stopping")
+                break
+
+# Run Training
+train_model(epochs=20)
