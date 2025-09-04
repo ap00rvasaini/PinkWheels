@@ -1,0 +1,83 @@
+# Install YOLOv8 once
+# pip install ultralytics
+
+import os
+import csv
+from ultralytics import YOLO
+
+# ----------------------------
+# CONFIG
+# ----------------------------
+DATA_YAML = "bird_dataset/data.yaml"   # YOLO dataset config file
+MODEL_NAME = "yolov8x.pt"              # largest + most accurate (use yolov8l for lighter)
+EPOCHS = 50
+BATCH = 16
+IMG_SIZE = 640
+OUTPUT_DIR = "runs/detect/train"
+CSV_OUTPUT = "detections.csv"
+CONF_THRESHOLD = 0.25
+IOU_THRESHOLD = 0.45
+DEVICE = 0  # 0 = first GPU, 'cpu' = CPU
+# ----------------------------
+
+def train():
+    # 1. Load pretrained model (COCO pretrained weights)
+    model = YOLO(MODEL_NAME)
+
+    # 2. Train on custom dataset
+    model.train(
+        data=DATA_YAML,
+        epochs=EPOCHS,
+        batch=BATCH,
+        imgsz=IMG_SIZE,
+        device=DEVICE,
+        workers=4,
+        optimizer="AdamW",   # better for convergence
+        lr0=1e-3,
+        lrf=1e-5,
+        patience=10,
+        cos_lr=True,
+        amp=True             # mixed precision for speed
+    )
+
+    print("✅ Training finished. Best weights saved in:", OUTPUT_DIR)
+
+
+def validate():
+    # 3. Validate model (mAP, precision, recall)
+    model = YOLO(os.path.join(OUTPUT_DIR, "weights/best.pt"))
+    results = model.val(conf=CONF_THRESHOLD, iou=IOU_THRESHOLD)
+    print("✅ Validation metrics:", results)
+
+
+def infer_and_export(test_dir="bird_dataset/test"):
+    # 4. Inference on test set + CSV export
+    model = YOLO(os.path.join(OUTPUT_DIR, "weights/best.pt"))
+
+    results = model.predict(
+        source=test_dir,
+        save=True,           # saves images with bboxes
+        imgsz=IMG_SIZE,
+        conf=CONF_THRESHOLD,
+        iou=IOU_THRESHOLD,
+        device=DEVICE
+    )
+
+    # 5. Write results to CSV
+    with open(CSV_OUTPUT, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["filename", "x1", "y1", "x2", "y2", "class", "confidence"])
+        for r in results:
+            for box in r.boxes:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                cls = int(box.cls[0])
+                conf = float(box.conf[0])
+                writer.writerow([os.path.basename(r.path), x1, y1, x2, y2, model.names[cls], conf])
+
+    print(f"✅ Predictions saved to {CSV_OUTPUT}")
+
+
+if __name__ == "__main__":
+    train()
+    validate()
+    infer_and_export()
